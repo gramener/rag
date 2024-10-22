@@ -1,0 +1,47 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.env
+
+# IDE-specific files
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Test coverage
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+
+# Build directories
+build/
+dist/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Package files
+*.egg
+*.egg-info/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# PDF files (in case test_api.py generates any)
+*.pdf
+
+# FastAPI specific
+.pytest_cache/
+
+# Uvicorn
+uvicorn.log
