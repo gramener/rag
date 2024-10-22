@@ -2,21 +2,44 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "fastapi",
+#     "httpx",
 #     "pydantic",
 #     "python-multipart",
 #     "uvicorn",
 # ]
 # ///
-from fastapi import FastAPI, HTTPException, Depends, Query, UploadFile, File
-from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+from fastapi import FastAPI, HTTPException, Depends, Query, UploadFile, File, Header
 from fastapi.responses import JSONResponse
+import httpx
+from pydantic import BaseModel, Field
+from typing import List, Dict, Optional, Any
+from datetime import datetime, timezone
+import sqlite3
+import uuid
+import json
 
 app = FastAPI(title="RAG API", version="1.0.0")
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+async def get_token(authorization: str = Header(...)):
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    return authorization.split()[1]
+
+async def forward_request(url: str, method: str, token: str, **kwargs):
+    async with httpx.AsyncClient() as client:
+        headers = {"Authorization": f"Bearer {token}"}
+        response = await client.request(method, url, headers=headers, **kwargs)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.json())
+        return response.json()
+
+def get_db():
+    db = sqlite3.connect("collections.db")
+    db.row_factory = sqlite3.Row
+    return db
+
+with get_db() as db:
+    db.execute("CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, data JSON)")
 
 class ErrorResponse(BaseModel):
     message: str
@@ -31,15 +54,22 @@ class Collection(BaseModel):
     created_at: datetime
     extraction_strategy: Dict[str, str]
     embedding_model: str
+    # Add any future fields here
 
 class CollectionCreate(BaseModel):
-    name: str
-    authors: List[str]
-    extraction_strategy: Dict[str, str]
-    embedding_model: str
+    name: str = Field(..., description="The name of the collection")
+    authors: List[str] = Field(..., description="List of authors for the collection")
+    extraction_strategy: Dict[str, str] = Field(..., description="Extraction strategy details")
+    embedding_model: str = Field(..., description="The embedding model to use")
+    # Add any future fields here
 
 class CollectionUpdate(BaseModel):
+    # All fields are optional for updates
+    name: Optional[str] = None
     authors: Optional[List[str]] = None
+    extraction_strategy: Optional[Dict[str, str]] = None
+    embedding_model: Optional[str] = None
+    # Add any future fields here
 
 class DocumentResponse(BaseModel):
     file_id: str
@@ -57,63 +87,101 @@ class SearchResponse(BaseModel):
     total: int
     processing_time: str
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    # Implement user authentication logic here
-    pass
-
-@app.get("/v1/collections", response_model=Dict[str, Any])
+@app.get("/v1/collections")
 async def list_collections(
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=100),
-    author: Optional[str] = None,
-    created_after: Optional[datetime] = None,
-    current_user: Any = Depends(get_current_user)
+    filters: str = Query(default="{}"),
+    sort: Optional[str] = Query(None, description="Format: field1,-field2,field3")
 ):
-    # Implement collection listing logic here
-    pass
+    offset = (page - 1) * per_page
+    query = "SELECT data FROM collections"
+    params = []
 
-@app.post("/v1/collections", response_model=Collection, status_code=201)
-async def create_collection(
-    collection: CollectionCreate,
-    current_user: Any = Depends(get_current_user)
-):
-    # Implement collection creation logic here
-    pass
+    filters_dict = json.loads(filters)
+    if filters_dict:
+        query += " WHERE " + " AND ".join(f"json_extract(data, '$.{k}') = ?" for k in filters_dict)
+        params.extend(filters_dict.values())
 
-@app.patch("/v1/collections/{collection_id}", response_model=Collection)
-async def update_collection(
-    collection_id: str,
-    update_data: CollectionUpdate,
-    current_user: Any = Depends(get_current_user)
-):
-    # Implement collection update logic here
-    pass
+    if sort:
+        sort_fields = []
+        for field in sort.split(','):
+            if field.startswith('-'):
+                sort_fields.append(f"json_extract(data, '$.{field[1:]}') DESC")
+            else:
+                sort_fields.append(f"json_extract(data, '$.{field}') ASC")
+        query += " ORDER BY " + ", ".join(sort_fields)
+
+    query += f" LIMIT ? OFFSET ?"
+    params.extend([per_page, offset])
+
+    with get_db() as db:
+        results = [json.loads(row['data']) for row in db.execute(query, params)]
+        total = db.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
+
+    return {"collections": results, "total": total}
+
+@app.get("/v1/collections/{collection_id}")
+async def get_collection(collection_id: str):
+    with get_db() as db:
+        result = db.execute("SELECT data FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Collection not found")
+    return json.loads(result['data'])
+
+@app.post("/v1/collections", status_code=201)
+async def create_collection(collection: CollectionCreate):
+    collection_id = str(uuid.uuid4())
+    data = collection.model_dump()
+    data['id'] = collection_id
+    data['created_at'] = datetime.now(timezone.utc).isoformat()
+
+    with get_db() as db:
+        db.execute("INSERT INTO collections (id, data) VALUES (?, ?)",
+                   (collection_id, json.dumps(data)))
+
+    return data
+
+@app.patch("/v1/collections/{collection_id}")
+async def update_collection(collection_id: str, update_data: CollectionUpdate):
+    with get_db() as db:
+        existing = db.execute("SELECT data FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Collection not found")
+
+        data = json.loads(existing['data'])
+        data.update({k: v for k, v in update_data.model_dump().items() if v is not None})
+
+        db.execute("UPDATE collections SET data = ? WHERE id = ?",
+                   (json.dumps(data), collection_id))
+
+    return data
 
 @app.delete("/v1/collections/{collection_id}", status_code=204)
-async def delete_collection(
-    collection_id: str,
-    current_user: Any = Depends(get_current_user)
-):
-    # Implement collection deletion logic here
-    pass
+async def delete_collection(collection_id: str):
+    with get_db() as db:
+        result = db.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Collection not found")
+    return None
 
 @app.post("/v1/collections/{collection_id}/documents", response_model=DocumentResponse, status_code=201)
 async def add_document(
     collection_id: str,
     file: UploadFile = File(...),
-    current_user: Any = Depends(get_current_user)
+    token: str = Depends(get_token)
 ):
-    # Implement document addition logic here
-    pass
+    files = {"file": (file.filename, file.file, file.content_type)}
+    return await forward_request(f"https://external-api.com/v1/collections/{collection_id}/documents", "POST", token, files=files)
 
 @app.delete("/v1/collections/{collection_id}/documents/{file_id}", status_code=204)
 async def delete_document(
     collection_id: str,
     file_id: str,
-    current_user: Any = Depends(get_current_user)
+    token: str = Depends(get_token)
 ):
-    # Implement document deletion logic here
-    pass
+    await forward_request(f"https://external-api.com/v1/collections/{collection_id}/documents/{file_id}", "DELETE", token)
+    return None
 
 @app.get("/v1/collections/{collection_id}/search", response_model=SearchResponse)
 async def vector_search(
@@ -123,10 +191,17 @@ async def vector_search(
     rerank_strategy: Optional[str] = None,
     similarity_threshold: float = Query(0.7, ge=0, le=1),
     fuzzy: bool = False,
-    current_user: Any = Depends(get_current_user)
+    token: str = Depends(get_token)
 ):
-    # Implement vector search logic here
-    pass
+    params = {
+        "q": q,
+        "n": n,
+        "similarity_threshold": similarity_threshold,
+        "fuzzy": fuzzy
+    }
+    if rerank_strategy:
+        params["rerank_strategy"] = rerank_strategy
+    return await forward_request(f"https://external-api.com/v1/collections/{collection_id}/search", "GET", token, params=params)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):

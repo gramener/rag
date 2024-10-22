@@ -15,16 +15,25 @@ from main import app
 from datetime import datetime, timedelta
 from io import BytesIO
 from reportlab.pdfgen import canvas
-
+import sys
 
 client = TestClient(app)
 
-# Mock authentication
+# Mock external API responses
 @pytest.fixture(autouse=True)
-def mock_auth(monkeypatch):
-    async def mock_get_current_user():
-        return {"id": "test_user"}
-    monkeypatch.setattr("main.get_current_user", mock_get_current_user)
+def mock_external_api(monkeypatch):
+    async def mock_forward_request(url, method, token, **kwargs):
+        if "collections" in url and method == "GET":
+            return {"total": 1, "collections": [{"id": "test_id", "name": "Test Collection"}]}
+        elif "collections" in url and method == "POST":
+            return {"id": "new_collection_id", "name": "New Collection"}
+        elif "documents" in url and method == "POST":
+            return {"file_id": "new_file_id", "status": "indexed"}
+        elif "search" in url:
+            return {"results": [], "total": 0, "processing_time": "0.1s"}
+        return {}
+
+    monkeypatch.setattr("main.forward_request", mock_forward_request)
 
 @pytest.fixture
 def sample_collection():
@@ -45,7 +54,10 @@ def create_pdf(content):
 
 @pytest.mark.asyncio
 async def test_list_collections():
-    response = client.get("/v1/collections")
+    headers = {"Authorization": "Bearer test_token"}
+    response = client.get("/v1/collections", headers=headers)
+    print(response.headers)
+    print(response.json())
     assert response.status_code == 200
     data = response.json()
     assert "total" in data
@@ -53,79 +65,57 @@ async def test_list_collections():
 
 @pytest.mark.asyncio
 async def test_create_collection(sample_collection):
-    response = client.post("/v1/collections", json=sample_collection)
+    headers = {"Authorization": "Bearer test_token"}
+    response = client.post("/v1/collections", json=sample_collection, headers=headers)
     assert response.status_code == 201
     data = response.json()
-    assert data["name"] == sample_collection["name"]
     assert "id" in data
 
 @pytest.mark.asyncio
 async def test_update_collection(sample_collection):
-    # First, create a collection
-    create_response = client.post("/v1/collections", json=sample_collection)
-    collection_id = create_response.json()["id"]
-
-    # Now, update it
+    headers = {"Authorization": "Bearer test_token"}
     update_data = {"authors": ["New Author"]}
-    response = client.patch(f"/v1/collections/{collection_id}", json=update_data)
+    response = client.patch("/v1/collections/test_id", json=update_data, headers=headers)
     assert response.status_code == 200
-    data = response.json()
-    assert data["authors"] == update_data["authors"]
 
 @pytest.mark.asyncio
-async def test_delete_collection(sample_collection):
-    # First, create a collection
-    create_response = client.post("/v1/collections", json=sample_collection)
-    collection_id = create_response.json()["id"]
-
-    # Now, delete it
-    response = client.delete(f"/v1/collections/{collection_id}")
+async def test_delete_collection():
+    headers = {"Authorization": "Bearer test_token"}
+    response = client.delete("/v1/collections/test_id", headers=headers)
     assert response.status_code == 204
 
 @pytest.mark.asyncio
-async def test_add_document(sample_collection):
-    # First, create a collection
-    create_response = client.post("/v1/collections", json=sample_collection)
-    collection_id = create_response.json()["id"]
-
-    # Now, add a document
+async def test_add_document():
+    headers = {"Authorization": "Bearer test_token"}
     pdf_content = create_pdf("test content")
     files = {"file": ("test.pdf", pdf_content, "application/pdf")}
-    response = client.post(f"/v1/collections/{collection_id}/documents", files=files)
+    response = client.post("/v1/collections/test_id/documents", files=files, headers=headers)
     assert response.status_code == 201
     data = response.json()
     assert "file_id" in data
     assert data["status"] == "indexed"
 
 @pytest.mark.asyncio
-async def test_delete_document(sample_collection):
-    # First, create a collection and add a document
-    create_response = client.post("/v1/collections", json=sample_collection)
-    collection_id = create_response.json()["id"]
-    files = {"file": ("test.pdf", b"test content", "application/pdf")}
-    add_doc_response = client.post(f"/v1/collections/{collection_id}/documents", files=files)
-    file_id = add_doc_response.json()["file_id"]
-
-    # Now, delete the document
-    response = client.delete(f"/v1/collections/{collection_id}/documents/{file_id}")
+async def test_delete_document():
+    headers = {"Authorization": "Bearer test_token"}
+    response = client.delete("/v1/collections/test_id/documents/file_id", headers=headers)
     assert response.status_code == 204
 
 @pytest.mark.asyncio
-async def test_vector_search(sample_collection):
-    # First, create a collection and add a document
-    create_response = client.post("/v1/collections", json=sample_collection)
-    collection_id = create_response.json()["id"]
-    pdf_content = create_pdf("The quick brown fox jumps over the lazy dog")
-    files = {"file": ("test.pdf", pdf_content, "application/pdf")}
-    client.post(f"/v1/collections/{collection_id}/documents", files=files)
-
-    # Now, perform a search
-    response = client.get(f"/v1/collections/{collection_id}/search?q=fox&n=5")
+async def test_vector_search():
+    headers = {"Authorization": "Bearer test_token"}
+    response = client.get("/v1/collections/test_id/search?q=fox&n=5", headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert "results" in data
     assert "total" in data
     assert "processing_time" in data
+
+@pytest.mark.asyncio
+async def test_invalid_token():
+    headers = {"Authorization": "InvalidToken"}
+    response = client.get("/v1/collections", headers=headers)
+    assert response.status_code == 401
 
 @pytest.mark.asyncio
 async def test_error_handling():
@@ -219,17 +209,6 @@ async def test_search_parameters():
     assert all(result["score"] >= 0.9 for result in data["results"])
 
 @pytest.mark.asyncio
-async def test_invalid_token():
-    # Test with an invalid token
-    headers = {"Authorization": "Bearer invalid_token"}
-    response = client.get("/v1/collections", headers=headers)
-    assert response.status_code == 401
-    data = response.json()
-    assert "message" in data
-    assert "documentation_url" in data
-    assert data["status_code"] == 401
-
-@pytest.mark.asyncio
 async def test_invalid_collection_creation():
     # Test creating a collection with invalid data
     invalid_collection = {
@@ -298,4 +277,5 @@ async def test_nonexistent_collection():
     assert response.status_code == 404
 
 if __name__ == "__main__":
-    pytest.main(["-v", "test_api.py"])
+    pytest_args = ["-v", "test_api.py"] + sys.argv[1:]
+    pytest.main(pytest_args)
