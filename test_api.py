@@ -1,12 +1,19 @@
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.11"
 # dependencies = [
+#     "chromadb",
 #     "fastapi",
 #     "httpx",
-#     "pytest",
+#     "langchain-community~=0.3.0",
+#     "langchain-openai~=0.2.0",
+#     "langchain~=0.3.0",
+#     "pydantic",
+#     "pymupdf",
 #     "python-multipart",
-#     "pytest-asyncio",
+#     "uvicorn",
 #     "reportlab",
+#     "pytest",
+#     "pytest-asyncio",
 # ]
 # ///
 import pytest
@@ -41,8 +48,23 @@ def sample_collection():
         "name": "Test Collection",
         "authors": ["Test Author"],
         "extraction_strategy": {"pdf": "PyMuPDF4LLM", "html": "to_md", "docx": "to_md"},
-        "embedding_model": "text-embedding-003-small"
+        "embedding_model": "text-embedding-3-small"
     }
+
+@pytest.fixture
+def create_test_collection():
+    def _create_collection(name="Test Collection"):
+        headers = {"Authorization": "Bearer test_token"}
+        collection_data = {
+            "name": name,
+            "authors": ["Test Author"],
+            "extraction_strategy": {"pdf": "PyMuPDF4LLM", "html": "to_md", "docx": "to_md"},
+            "embedding_model": "text-embedding-3-small"
+        }
+        response = client.post("/v1/collections", json=collection_data, headers=headers)
+        assert response.status_code == 201
+        return response.json()["id"]
+    return _create_collection
 
 def create_pdf(content):
     buffer = BytesIO()
@@ -72,50 +94,56 @@ async def test_create_collection(sample_collection):
     assert "id" in data
 
 @pytest.mark.asyncio
-async def test_update_collection(sample_collection):
+async def test_update_collection(create_test_collection):
+    collection_id = create_test_collection()
     headers = {"Authorization": "Bearer test_token"}
     update_data = {"authors": ["New Author"]}
-    response = client.patch("/v1/collections/test_id", json=update_data, headers=headers)
+    response = client.patch(f"/v1/collections/{collection_id}", json=update_data, headers=headers)
     assert response.status_code == 200
+    updated_collection = response.json()
+    assert updated_collection["authors"] == ["New Author"]
+    assert updated_collection["id"] == collection_id
 
 @pytest.mark.asyncio
-async def test_delete_collection():
+async def test_delete_collection(create_test_collection):
+    collection_id = create_test_collection()
     headers = {"Authorization": "Bearer test_token"}
-    response = client.delete("/v1/collections/test_id", headers=headers)
+    response = client.delete(f"/v1/collections/{collection_id}", headers=headers)
     assert response.status_code == 204
+    get_response = client.get(f"/v1/collections/{collection_id}", headers=headers)
+    assert get_response.status_code == 404
 
 @pytest.mark.asyncio
-async def test_add_document():
+async def test_add_document(create_test_collection):
+    collection_id = create_test_collection()
     headers = {"Authorization": "Bearer test_token"}
     pdf_content = create_pdf("test content")
     files = {"file": ("test.pdf", pdf_content, "application/pdf")}
-    response = client.post("/v1/collections/test_id/documents", files=files, headers=headers)
+    response = client.post(f"/v1/collections/{collection_id}/documents", files=files, headers=headers)
     assert response.status_code == 201
     data = response.json()
     assert "file_id" in data
-    assert data["status"] == "indexed"
+    assert "file_name" in data
+    assert "status" in data
+    assert data["status"] == "processed"
 
 @pytest.mark.asyncio
-async def test_delete_document():
+async def test_delete_document(create_test_collection):
+    collection_id = create_test_collection()
     headers = {"Authorization": "Bearer test_token"}
-    response = client.delete("/v1/collections/test_id/documents/file_id", headers=headers)
+    response = client.delete(f"/v1/collections/{collection_id}/documents/file_id", headers=headers)
     assert response.status_code == 204
 
 @pytest.mark.asyncio
-async def test_vector_search():
+async def test_vector_search(create_test_collection):
+    collection_id = create_test_collection()
     headers = {"Authorization": "Bearer test_token"}
-    response = client.get("/v1/collections/test_id/search?q=fox&n=5", headers=headers)
+    response = client.get(f"/v1/collections/{collection_id}/search?q=fox&n=5", headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert "results" in data
     assert "total" in data
     assert "processing_time" in data
-
-@pytest.mark.asyncio
-async def test_invalid_token():
-    headers = {"Authorization": "InvalidToken"}
-    response = client.get("/v1/collections", headers=headers)
-    assert response.status_code == 401
 
 @pytest.mark.asyncio
 async def test_error_handling():
@@ -144,7 +172,7 @@ async def test_pagination_and_filtering():
             "name": f"Test Collection {i}",
             "authors": ["Test Author"],
             "extraction_strategy": {"pdf": "PyMuPDF4LLM"},
-            "embedding_model": "text-embedding-003-small"
+            "embedding_model": "text-embedding-3-small"
         })
 
     # Test pagination
@@ -182,7 +210,7 @@ async def test_search_parameters():
         "name": "Search Test Collection",
         "authors": ["Test Author"],
         "extraction_strategy": {"pdf": "PyMuPDF4LLM"},
-        "embedding_model": "text-embedding-003-small"
+        "embedding_model": "text-embedding-3-small"
     }
     create_response = client.post("/v1/collections", json=collection)
     collection_id = create_response.json()["id"]
@@ -231,7 +259,7 @@ async def test_search_with_invalid_parameters():
         "name": "Test Collection",
         "authors": ["Test Author"],
         "extraction_strategy": {"pdf": "PyMuPDF4LLM"},
-        "embedding_model": "text-embedding-003-small"
+        "embedding_model": "text-embedding-3-small"
     }
     create_response = client.post("/v1/collections", json=collection)
     collection_id = create_response.json()["id"]

@@ -1,22 +1,34 @@
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.11"
 # dependencies = [
+#     "chromadb",
 #     "fastapi",
 #     "httpx",
+#     "langchain-community~=0.3.0",
+#     "langchain-openai~=0.2.0",
+#     "langchain~=0.3.0",
 #     "pydantic",
+#     "pymupdf",
 #     "python-multipart",
 #     "uvicorn",
 # ]
 # ///
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Depends, Query, UploadFile, File, Header
 from fastapi.responses import JSONResponse
-import httpx
+from langchain_community.document_loaders import PyMuPDFLoader
+from langchain_community.vectorstores import Chroma
+from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
-from datetime import datetime, timezone
-import sqlite3
-import uuid
+import httpx
 import json
+import os
+import shutil
+import sqlite3
+import tempfile
+import uuid
 
 app = FastAPI(title="RAG API", version="1.0.0")
 
@@ -171,17 +183,50 @@ async def add_document(
     file: UploadFile = File(...),
     token: str = Depends(get_token)
 ):
-    files = {"file": (file.filename, file.file, file.content_type)}
-    return await forward_request(f"https://external-api.com/v1/collections/{collection_id}/documents", "POST", token, files=files)
+    with get_db() as db:
+        result = db.execute("SELECT data FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Collection not found")
+    embedding_model = json.loads(result['data'])['embedding_model']
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
+        temp_file.write(await file.read())
+        temp_file_path = temp_file.name
+
+    try:
+        loader = PyMuPDFLoader(temp_file_path)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=20)
+        documents = text_splitter.split_documents(loader.load())
+        for doc in documents:
+            doc.metadata.update({"key": file.filename, "h1": f"{file.filename} p{doc.metadata['page'] + 1}"})
+
+        Chroma.from_documents(
+            documents,
+            OpenAIEmbeddings(model=embedding_model),
+            persist_directory=f".chromadb/{collection_id}",
+            collection_name=collection_id,
+        )
+
+        return DocumentResponse(file_id=str(uuid.uuid4()), file_name=file.filename, status="processed")
+    finally:
+        os.unlink(temp_file_path)
 
 @app.delete("/v1/collections/{collection_id}/documents/{file_id}", status_code=204)
-async def delete_document(
-    collection_id: str,
-    file_id: str,
-    token: str = Depends(get_token)
-):
-    await forward_request(f"https://external-api.com/v1/collections/{collection_id}/documents/{file_id}", "DELETE", token)
-    return None
+async def delete_document(collection_id: str, file_id: str, token: str = Depends(get_token)):
+    # Verify collection exists
+    with get_db() as db:
+        result = db.execute(
+            "SELECT data FROM collections WHERE id = ?", (collection_id,)
+        ).fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Collection not found")
+
+    try:
+        shutil.rmtree(f".chromadb/{collection_id}", ignore_errors=True)
+        return None  # 204 No Content
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+
 
 @app.get("/v1/collections/{collection_id}/search", response_model=SearchResponse)
 async def vector_search(

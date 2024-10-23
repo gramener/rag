@@ -1,5 +1,6 @@
 # Ignore databases
 *.db
+.chromadb/
 
 # Python cache files
 __pycache__/

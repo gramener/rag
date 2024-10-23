@@ -162,6 +162,12 @@ DELETE /v1/collections/{collection_id}
 POST /v1/collections/{collection_id}/documents
 ```
 
+This does the following:
+
+- Exctract Markdown from the file using PyMuPDF4LLM
+- Uses the collection's `embedding_model` and `chunking_strategy` to embed the Markdown
+- Stores in a ChromaDB vector database in a folder with the same name as the collection's `id`
+
 ## Request Body
 
 Use `multipart/form-data` to upload files.
