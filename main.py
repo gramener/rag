@@ -124,7 +124,7 @@ async def list_collections(
                 sort_fields.append(f"json_extract(data, '$.{field}') ASC")
         query += " ORDER BY " + ", ".join(sort_fields)
 
-    query += f" LIMIT ? OFFSET ?"
+    query += " LIMIT ? OFFSET ?"
     params.extend([per_page, offset])
 
     with get_db() as db:

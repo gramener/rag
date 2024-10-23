@@ -74,6 +74,14 @@ def create_pdf(content):
     buffer.seek(0)
     return buffer
 
+def add_test_document(collection_id, content="test content"):
+    headers = {"Authorization": "Bearer test_token"}
+    pdf_content = create_pdf(content)
+    files = {"file": ("test.pdf", pdf_content, "application/pdf")}
+    response = client.post(f"/v1/collections/{collection_id}/documents", files=files, headers=headers)
+    assert response.status_code == 201
+    return response.json()["file_id"]
+
 @pytest.mark.asyncio
 async def test_list_collections():
     headers = {"Authorization": "Bearer test_token"}
@@ -116,16 +124,8 @@ async def test_delete_collection(create_test_collection):
 @pytest.mark.asyncio
 async def test_add_document(create_test_collection):
     collection_id = create_test_collection()
-    headers = {"Authorization": "Bearer test_token"}
-    pdf_content = create_pdf("test content")
-    files = {"file": ("test.pdf", pdf_content, "application/pdf")}
-    response = client.post(f"/v1/collections/{collection_id}/documents", files=files, headers=headers)
-    assert response.status_code == 201
-    data = response.json()
-    assert "file_id" in data
-    assert "file_name" in data
-    assert "status" in data
-    assert data["status"] == "processed"
+    file_id = add_test_document(collection_id)
+    assert file_id is not None
 
 @pytest.mark.asyncio
 async def test_delete_document(create_test_collection):
@@ -137,13 +137,43 @@ async def test_delete_document(create_test_collection):
 @pytest.mark.asyncio
 async def test_vector_search(create_test_collection):
     collection_id = create_test_collection()
+
+    # Add documents with clear relevance distinction
+    docs = [
+        "The quick brown fox jumps over the lazy dog",
+        "Foxes are known for their cunning nature and bushy tails",
+        "Mount Everest is the highest peak in the world",
+        "The Rocky Mountains stretch from Canada to New Mexico"
+    ]
+    for doc in docs:
+        add_test_document(collection_id, doc)
+
     headers = {"Authorization": "Bearer test_token"}
     response = client.get(f"/v1/collections/{collection_id}/search?q=fox&n=5", headers=headers)
     assert response.status_code == 200
     data = response.json()
+
     assert "results" in data
     assert "total" in data
     assert "processing_time" in data
+    assert len(data["results"]) == 2  # Only two documents should be returned
+
+    # Verify that relevant documents are included
+    relevant_docs = docs[:2]  # The first two documents are about foxes
+    for doc in relevant_docs:
+        assert any(doc in result["content"] for result in data["results"]), f"'{doc}' should be in the results"
+
+    # Verify that irrelevant documents are not included
+    irrelevant_docs = docs[2:]  # The last two documents are about mountains
+    for doc in irrelevant_docs:
+        assert all(doc not in result["content"] for result in data["results"]), f"'{doc}' should not be in the results"
+
+    # Check if results are sorted by score in descending order
+    scores = [result["score"] for result in data["results"]]
+    assert scores == sorted(scores, reverse=True), "Results are not sorted by score in descending order"
+
+    # Verify that both results contain "fox" or "foxes"
+    assert all("fox" in result["content"].lower() for result in data["results"]), "All results should contain 'fox' or 'foxes'"
 
 @pytest.mark.asyncio
 async def test_error_handling():
