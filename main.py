@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "chromadb",
+#     "duckdb",
 #     "fastapi",
 #     "httpx",
 #     "langchain-community~=0.3.0",
@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Depends, Query, UploadFile, File, Header
 from fastapi.responses import JSONResponse
 from langchain_community.document_loaders import PyMuPDFLoader
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import DuckDB
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel, Field
@@ -29,6 +29,7 @@ import shutil
 import sqlite3
 import tempfile
 import uuid
+import duckdb
 
 app = FastAPI(title="RAG API", version="1.0.0")
 
@@ -200,12 +201,14 @@ async def add_document(
         for doc in documents:
             doc.metadata.update({"key": file.filename, "h1": f"{file.filename} p{doc.metadata['page'] + 1}"})
 
-        Chroma.from_documents(
-            documents,
-            OpenAIEmbeddings(model=embedding_model),
-            persist_directory=f".chromadb/{collection_id}",
-            collection_name=collection_id,
-        )
+        conn = duckdb.connect(database=f"{collection_id}.duckdb", config={
+            "enable_external_access": "false",
+            "autoinstall_known_extensions": "false",
+            "autoload_known_extensions": "false"
+        })
+        embedding_function = OpenAIEmbeddings(model=embedding_model)  # Define or import your embedding function here
+        vector_store = DuckDB(connection=conn, embedding=embedding_function)
+        vector_store.from_documents(documents, embedding_function)
 
         return DocumentResponse(file_id=str(uuid.uuid4()), file_name=file.filename, status="processed")
     finally:
@@ -221,11 +224,18 @@ async def delete_document(collection_id: str, file_id: str, token: str = Depends
         if not result:
             raise HTTPException(status_code=404, detail="Collection not found")
 
+    # Delete the document from the vector store
     try:
-        shutil.rmtree(f".chromadb/{collection_id}", ignore_errors=True)
-        return None  # 204 No Content
-    except Exception as e:
+        conn = duckdb.connect(database=f"{collection_id}.duckdb", config={
+            "enable_external_access": "false",
+            "autoinstall_known_extensions": "false",
+            "autoload_known_extensions": "false"
+        })
+        conn.execute(f"DELETE FROM embeddings WHERE id = '{file_id}'")
+    except duckdb.Error as e:
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+    finally:
+        conn.close()
 
 
 @app.get("/v1/collections/{collection_id}/search", response_model=SearchResponse)
@@ -233,20 +243,31 @@ async def vector_search(
     collection_id: str,
     q: str = Query(..., min_length=1),
     n: int = Query(10, ge=1, le=100),
-    rerank_strategy: Optional[str] = None,
-    similarity_threshold: float = Query(0.7, ge=0, le=1),
-    fuzzy: bool = False,
     token: str = Depends(get_token)
 ):
-    params = {
-        "q": q,
-        "n": n,
-        "similarity_threshold": similarity_threshold,
-        "fuzzy": fuzzy
-    }
-    if rerank_strategy:
-        params["rerank_strategy"] = rerank_strategy
-    return await forward_request(f"https://external-api.com/v1/collections/{collection_id}/search", "GET", token, params=params)
+    with get_db() as db:
+        result = db.execute("SELECT data FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Collection not found")
+    embedding_model = json.loads(result['data'])['embedding_model']
+
+    try:
+        conn = duckdb.connect(database=f"{collection_id}.duckdb", config={
+            "enable_external_access": "false",
+            "autoinstall_known_extensions": "false",
+            "autoload_known_extensions": "false"
+        })
+        embedding_function = OpenAIEmbeddings(model=embedding_model)  # Define or import your embedding function here
+        vector_store = DuckDB(connection=conn, embedding=embedding_function)
+        results = vector_store.similarity_search(q, n)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error searching: {str(e)}")
+    finally:
+        conn.close()
+
+    return {"results": results, "total": len(results)}
+
+
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):

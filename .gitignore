@@ -1,6 +1,6 @@
 # Ignore databases
 *.db
-.chromadb/
+*.duckdb*
 
 # Python cache files
 __pycache__/

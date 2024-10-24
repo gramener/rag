@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "chromadb",
+#     "duckdb",
 #     "fastapi",
 #     "httpx",
 #     "langchain-community~=0.3.0",
@@ -130,8 +130,9 @@ async def test_add_document(create_test_collection):
 @pytest.mark.asyncio
 async def test_delete_document(create_test_collection):
     collection_id = create_test_collection()
+    file_id = add_test_document(collection_id)
     headers = {"Authorization": "Bearer test_token"}
-    response = client.delete(f"/v1/collections/{collection_id}/documents/file_id", headers=headers)
+    response = client.delete(f"/v1/collections/{collection_id}/documents/{file_id}", headers=headers)
     assert response.status_code == 204
 
 @pytest.mark.asyncio
